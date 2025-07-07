@@ -99,7 +99,9 @@ fun BluetoothSetupScreen(
                         },
                         showError = showNameError,
                         onNext = {
-                            if (playerName.trim().isNotEmpty()) {
+                            val trimmedName = playerName.trim()
+                            if (trimmedName.isNotEmpty()) {
+                                playerName = trimmedName // Actualizar con el nombre sin espacios
                                 currentStep = BluetoothSetupStep.CONNECTION_MODE
                             } else {
                                 showNameError = true
@@ -111,7 +113,7 @@ fun BluetoothSetupScreen(
                     ConnectionModeStep(
                         playerName = playerName,
                         onModeSelected = { isSearching ->
-                            onSetupComplete(playerName, isSearching)
+                            onSetupComplete(playerName.trim(), isSearching)
                         }
                     )
                 }
@@ -249,7 +251,15 @@ fun PlayerNameStep(
             
             OutlinedTextField(
                 value = playerName,
-                onValueChange = onNameChange,
+                onValueChange = { newName ->
+                    // Capitalizar automáticamente la primera letra
+                    val capitalizedName = if (newName.isNotEmpty()) {
+                        newName.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+                    } else {
+                        newName
+                    }
+                    onNameChange(capitalizedName)
+                },
                 label = { Text("Nombre del jugador") },
                 placeholder = { Text("Escribe tu nombre") },
                 singleLine = true,
@@ -291,7 +301,7 @@ fun ConnectionModeStep(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "¡Hola, $playerName! 👋",
+                text = "¡Hola, ${playerName.trim()}! 👋",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center

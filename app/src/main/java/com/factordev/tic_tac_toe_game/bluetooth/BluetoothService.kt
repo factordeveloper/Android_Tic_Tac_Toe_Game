@@ -55,6 +55,9 @@ class BluetoothService(private val context: Context) {
     private val _connectionEstablished = MutableStateFlow<Boolean>(false)
     val connectionEstablished: StateFlow<Boolean> = _connectionEstablished.asStateFlow()
     
+    private val _receivedGameStartSync = MutableStateFlow<Boolean>(false)
+    val receivedGameStartSync: StateFlow<Boolean> = _receivedGameStartSync.asStateFlow()
+    
     private val _receivedGameReset = MutableStateFlow<Boolean>(false)
     val receivedGameReset: StateFlow<Boolean> = _receivedGameReset.asStateFlow()
     
@@ -69,6 +72,9 @@ class BluetoothService(private val context: Context) {
     
     private val _opponentDisconnected = MutableStateFlow<Boolean>(false)
     val opponentDisconnected: StateFlow<Boolean> = _opponentDisconnected.asStateFlow()
+    
+    private val _receivedGameEndSync = MutableStateFlow<Boolean>(false)
+    val receivedGameEndSync: StateFlow<Boolean> = _receivedGameEndSync.asStateFlow()
     
     private var bluetoothSocket: BluetoothSocket? = null
     private var bluetoothServerSocket: BluetoothServerSocket? = null
@@ -260,14 +266,26 @@ class BluetoothService(private val context: Context) {
         _receivedMove.value = null
         _receivedPlayerInfo.value = null
         _connectionEstablished.value = false
+        _receivedGameStartSync.value = false
         _receivedGameReset.value = false
         _receivedRematchRequest.value = false
         _receivedRematchResponse.value = null
         _receivedGameQuit.value = false
         _opponentDisconnected.value = false
+        _receivedGameEndSync.value = false
         isConnectionAlive = true
         lastHeartbeatReceived.set(System.currentTimeMillis())
         lastMessageSent.set(0)
+    }
+    
+    // Nueva función para resetear solo flags de juego
+    fun resetGameFlags() {
+        _receivedMove.value = null
+        _receivedGameStartSync.value = false
+        _receivedGameReset.value = false
+        _receivedRematchRequest.value = false
+        _receivedRematchResponse.value = null
+        _receivedGameEndSync.value = false
     }
     
     private fun listenForMessages() {
@@ -330,16 +348,39 @@ class BluetoothService(private val context: Context) {
                     MessageType.GAME_START -> {
                         _connectionEstablished.value = true
                     }
+                    MessageType.GAME_START_SYNC -> {
+                        _receivedGameStartSync.value = true
+                        // Auto-resetear el flag después de un breve delay
+                        scope.launch {
+                            kotlinx.coroutines.delay(100)
+                            _receivedGameStartSync.value = false
+                        }
+                    }
                     MessageType.GAME_RESET -> {
                         _receivedGameReset.value = true
+                        // Auto-resetear el flag después de un breve delay para asegurar que se procese
+                        scope.launch {
+                            kotlinx.coroutines.delay(100)
+                            _receivedGameReset.value = false
+                        }
                     }
                     MessageType.REMATCH_REQUEST -> {
                         _receivedRematchRequest.value = true
+                        // Auto-resetear el flag después de un breve delay
+                        scope.launch {
+                            kotlinx.coroutines.delay(100)
+                            _receivedRematchRequest.value = false
+                        }
                     }
                     MessageType.REMATCH_RESPONSE -> {
                         if (parts.size == 2) {
                             val response = parts[1] == "true"
                             _receivedRematchResponse.value = response
+                            // Auto-resetear el flag después de un breve delay
+                            scope.launch {
+                                kotlinx.coroutines.delay(100)
+                                _receivedRematchResponse.value = null
+                            }
                         }
                     }
                     MessageType.GAME_QUIT -> {
@@ -357,6 +398,14 @@ class BluetoothService(private val context: Context) {
                         } else if (parts.size == 2 && parts[1] == "pong") {
                             // Heartbeat recibido, conexión está viva
                             lastHeartbeatReceived.set(System.currentTimeMillis())
+                        }
+                    }
+                    MessageType.GAME_END_SYNC -> {
+                        _receivedGameEndSync.value = true
+                        // Auto-resetear el flag después de un breve delay
+                        scope.launch {
+                            kotlinx.coroutines.delay(100)
+                            _receivedGameEndSync.value = false
                         }
                     }
                 }
@@ -405,6 +454,15 @@ class BluetoothService(private val context: Context) {
         }
     }
     
+    fun sendGameStartSync() {
+        scope.launch {
+            val message = "${MessageType.GAME_START_SYNC}|sync"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar sincronización de inicio")
+            }
+        }
+    }
+    
     fun sendGameReset() {
         scope.launch {
             val message = "${MessageType.GAME_RESET}|reset"
@@ -445,6 +503,15 @@ class BluetoothService(private val context: Context) {
         scope.launch {
             val message = "${MessageType.OPPONENT_DISCONNECTED}|disconnected"
             sendMessageWithTimeout(message) // No manejar error aquí ya que nos estamos desconectando
+        }
+    }
+    
+    fun sendGameEndSync() {
+        scope.launch {
+            val message = "${MessageType.GAME_END_SYNC}|sync"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar sincronización de fin de juego")
+            }
         }
     }
     

@@ -61,6 +61,7 @@ fun GameScreen(
     viewModel: GameViewModel,
     onBluetoothClick: () -> Unit,
     onMoveBluetoothSend: (com.factordev.tic_tac_toe_game.model.Move) -> Unit = {},
+    onGameEndSync: () -> Unit = {},
     onBackToWelcome: () -> Unit,
     onGameReset: () -> Unit = {},
     onRematchRequest: () -> Unit = {},
@@ -75,6 +76,15 @@ fun GameScreen(
         if (gameState.gameStatus == GameStatus.WON) {
             // Pequeño delay para que se vea el estado ganador antes de los fuegos artificiales
             kotlinx.coroutines.delay(500)
+        }
+    }
+    
+    // Enviar sincronización cuando termina el juego
+    LaunchedEffect(gameState.gameStatus) {
+        if (gameState.gameStatus == GameStatus.WON || gameState.gameStatus == GameStatus.DRAW) {
+            if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+                onGameEndSync()
+            }
         }
     }
 

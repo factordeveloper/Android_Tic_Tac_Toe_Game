@@ -12,11 +12,20 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -24,7 +33,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.factordev.tic_tac_toe_game.bluetooth.BluetoothService
@@ -54,7 +67,10 @@ class MainActivity : ComponentActivity() {
     private val enableBluetoothLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode != RESULT_OK) {
+        if (result.resultCode == RESULT_OK) {
+            // Bluetooth activado exitosamente, mostrar mensaje de éxito
+            Toast.makeText(this, "Bluetooth activado correctamente", Toast.LENGTH_SHORT).show()
+        } else {
             Toast.makeText(this, "Se requiere activar Bluetooth para jugar multijugador", Toast.LENGTH_LONG).show()
         }
     }
@@ -132,6 +148,7 @@ fun TicTacToeApp(
 ) {
     var currentScreen by remember { mutableStateOf("welcome") }
     var playerName by remember { mutableStateOf("") }
+    var showBluetoothDisabledDialog by remember { mutableStateOf(false) }
     val viewModel: GameViewModel = viewModel()
     
     val gameState by viewModel.gameState.collectAsState()
@@ -140,10 +157,12 @@ fun TicTacToeApp(
     val receivedPlayerInfo by bluetoothService.receivedPlayerInfo.collectAsState()
     val connectionEstablished by bluetoothService.connectionEstablished.collectAsState()
     val receivedGameReset by bluetoothService.receivedGameReset.collectAsState()
+    val receivedGameStartSync by bluetoothService.receivedGameStartSync.collectAsState()
     val receivedRematchRequest by bluetoothService.receivedRematchRequest.collectAsState()
     val receivedRematchResponse by bluetoothService.receivedRematchResponse.collectAsState()
     val receivedGameQuit by bluetoothService.receivedGameQuit.collectAsState()
     val opponentDisconnected by bluetoothService.opponentDisconnected.collectAsState()
+    val receivedGameEndSync by bluetoothService.receivedGameEndSync.collectAsState()
     
     // Escuchar movimientos recibidos por Bluetooth
     LaunchedEffect(receivedMove) {
@@ -188,7 +207,20 @@ fun TicTacToeApp(
     // Escuchar reinicio de juego por Bluetooth
     LaunchedEffect(receivedGameReset) {
         if (receivedGameReset && gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
-            viewModel.resetGame()
+            viewModel.resetGameBluetooth()
+            // Enviar confirmación de sincronización
+            bluetoothService.sendGameStartSync()
+        }
+    }
+    
+    // Escuchar sincronización de inicio de juego
+    LaunchedEffect(receivedGameStartSync) {
+        if (receivedGameStartSync && gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+            // El oponente confirmó que está listo - asegurar sincronización
+            if (gameState.gameStatus == GameStatus.PLAYING && gameState.localPlayer == Player.X) {
+                // Solo el host (Player.X) confirma que es su turno
+                viewModel.resetGameBluetooth()
+            }
         }
     }
     
@@ -205,7 +237,10 @@ fun TicTacToeApp(
         receivedRematchResponse?.let { accepted ->
             if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
                 viewModel.handleRematchResponse(accepted)
-                if (!accepted) {
+                if (accepted) {
+                    // Si se acepta la revancha, enviar sincronización
+                    bluetoothService.sendGameStartSync()
+                } else {
                     // Si el oponente no quiere revancha, volver al menú principal
                     currentScreen = "welcome"
                 }
@@ -229,6 +264,14 @@ fun TicTacToeApp(
         }
     }
     
+    // Escuchar sincronización de fin de juego
+    LaunchedEffect(receivedGameEndSync) {
+        if (receivedGameEndSync && gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+            // Sincronizar el estado del juego cuando termina
+            viewModel.synchronizeGameEnd()
+        }
+    }
+    
     // Escuchar cambios en el estado de conexión Bluetooth
     LaunchedEffect(connectionState) {
         if (connectionState == BluetoothService.ConnectionState.DISCONNECTED && 
@@ -246,7 +289,7 @@ fun TicTacToeApp(
             bluetoothService.resetConnectionFlags()
         }
     }
-    
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -257,7 +300,12 @@ fun TicTacToeApp(
                     onModeSelected = { mode ->
                         viewModel.setGameMode(mode)
                         if (mode == GameMode.MULTIPLAYER_BLUETOOTH) {
-                            currentScreen = "bluetooth_setup"
+                            // Verificar si Bluetooth está activado
+                            if (bluetoothService.isBluetoothEnabled()) {
+                                currentScreen = "bluetooth_setup"
+                            } else {
+                                showBluetoothDisabledDialog = true
+                            }
                         } else {
                             currentScreen = "game"
                         }
@@ -296,12 +344,19 @@ fun TicTacToeApp(
                             bluetoothService.sendMove(move)
                         }
                     },
+                    onGameEndSync = {
+                        if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+                            bluetoothService.sendGameEndSync()
+                        }
+                    },
                     onBackToWelcome = { currentScreen = "welcome" },
                     onGameReset = {
                         if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
                             bluetoothService.sendGameReset()
+                            viewModel.resetGameBluetooth()
+                        } else {
+                            viewModel.resetGame()
                         }
-                        viewModel.resetGame()
                     },
                     onRematchRequest = {
                         if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
@@ -312,7 +367,10 @@ fun TicTacToeApp(
                     onRematchResponse = { accepted ->
                         if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
                             bluetoothService.sendRematchResponse(accepted)
-                            if (!accepted) {
+                            if (accepted) {
+                                // Si acepto la revancha, enviar sincronización
+                                bluetoothService.sendGameStartSync()
+                            } else {
                                 bluetoothService.sendGameQuit()
                                 currentScreen = "welcome"
                             }
@@ -335,4 +393,100 @@ fun TicTacToeApp(
             }
         }
     }
+    
+    // Diálogo de Bluetooth desactivado
+    if (showBluetoothDisabledDialog) {
+        BluetoothDisabledDialog(
+            onDismiss = { showBluetoothDisabledDialog = false },
+            onEnableBluetooth = {
+                onEnableBluetooth()
+                showBluetoothDisabledDialog = false
+            }
+        )
+    }
+    
+    // Verificar si el Bluetooth se activó para proceder automáticamente
+    LaunchedEffect(showBluetoothDisabledDialog) {
+        if (!showBluetoothDisabledDialog && bluetoothService.isBluetoothEnabled() && 
+            gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH && currentScreen == "welcome") {
+            // Bluetooth activado, proceder a configuración
+            currentScreen = "bluetooth_setup"
+        }
+    }
+}
+
+@Composable
+fun BluetoothDisabledDialog(
+    onDismiss: () -> Unit,
+    onEnableBluetooth: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "📶",
+                    fontSize = 24.sp
+                )
+                Text(
+                    text = "Bluetooth Desactivado",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    text = "Para jugar en modo multijugador Bluetooth necesitas activar el Bluetooth en tu dispositivo.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "El Bluetooth es necesario para:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "• Buscar otros jugadores cercanos",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                Text(
+                    text = "• Conectarte con otro dispositivo",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                Text(
+                    text = "• Sincronizar las partidas",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "¿Deseas activarlo ahora?",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onEnableBluetooth
+            ) {
+                Text("Activar Bluetooth")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDismiss
+            ) {
+                Text("Cancelar")
+            }
+        }
+    )
 }

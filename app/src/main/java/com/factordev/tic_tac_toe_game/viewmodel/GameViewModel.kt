@@ -37,8 +37,8 @@ class GameViewModel : ViewModel() {
 
     fun setPlayerNames(localName: String, opponentName: String) {
         _gameState.value = _gameState.value.copy(
-            localPlayerName = localName,
-            opponentPlayerName = opponentName
+            localPlayerName = localName.trim().replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() },
+            opponentPlayerName = opponentName.trim().replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
         )
     }
 
@@ -63,7 +63,10 @@ class GameViewModel : ViewModel() {
         val newGameState = currentState.copy(
             board = newBoard,
             currentPlayer = if (currentState.currentPlayer == Player.X) Player.O else Player.X,
-            isMyTurn = currentState.gameMode != GameMode.MULTIPLAYER_BLUETOOTH // En Bluetooth, no es nuestro turno después de mover
+            isMyTurn = when (currentState.gameMode) {
+                GameMode.MULTIPLAYER_BLUETOOTH -> false // En Bluetooth, no es nuestro turno después de mover
+                else -> true
+            }
         )
         
         val updatedState = checkGameEnd(newGameState)
@@ -157,10 +160,12 @@ class GameViewModel : ViewModel() {
         return when {
             winner != null -> gameState.copy(
                 gameStatus = GameStatus.WON,
-                winner = winner
+                winner = winner,
+                isMyTurn = false // Cuando termina el juego, nadie tiene turno
             )
             isBoardFull(gameState.board) -> gameState.copy(
-                gameStatus = GameStatus.DRAW
+                gameStatus = GameStatus.DRAW,
+                isMyTurn = false // Cuando termina el juego, nadie tiene turno
             )
             else -> gameState
         }
@@ -216,8 +221,10 @@ class GameViewModel : ViewModel() {
             currentPlayer = Player.X,
             gameStatus = GameStatus.PLAYING,
             winner = null,
-            isMyTurn = if (_gameState.value.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) 
-                        _gameState.value.localPlayer == Player.X else true,
+            isMyTurn = when (_gameState.value.gameMode) {
+                GameMode.MULTIPLAYER_BLUETOOTH -> _gameState.value.localPlayer == Player.X
+                else -> true
+            },
             showResetConfirmDialog = false,
             showRematchDialog = false,
             waitingForRematchResponse = false,
@@ -225,6 +232,53 @@ class GameViewModel : ViewModel() {
             showDisconnectionAlert = false,
             disconnectionMessage = ""
         )
+    }
+    
+    // Nueva función específica para reset sincronizado en Bluetooth
+    fun resetGameBluetooth() {
+        _gameState.value = _gameState.value.copy(
+            board = Array(3) { Array(3) { null } },
+            currentPlayer = Player.X,
+            gameStatus = GameStatus.PLAYING,
+            winner = null,
+            // En Bluetooth, siempre Player.X inicia (host)
+            isMyTurn = _gameState.value.localPlayer == Player.X,
+            showResetConfirmDialog = false,
+            showRematchDialog = false,
+            waitingForRematchResponse = false,
+            rematchMessage = "",
+            showDisconnectionAlert = false,
+            disconnectionMessage = ""
+        )
+    }
+    
+    // Función para forzar sincronización del estado del juego
+    fun syncGameState() {
+        val currentState = _gameState.value
+        if (currentState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+            // Asegurar que el estado de turnos esté correcto
+            val correctedState = currentState.copy(
+                isMyTurn = when {
+                    currentState.gameStatus != GameStatus.PLAYING -> false
+                    currentState.currentPlayer == currentState.localPlayer -> true
+                    else -> false
+                }
+            )
+            _gameState.value = correctedState
+        }
+    }
+    
+    // Función para synchronizar el estado cuando el juego termina
+    fun synchronizeGameEnd() {
+        val currentState = _gameState.value
+        if (currentState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH && 
+            (currentState.gameStatus == GameStatus.WON || currentState.gameStatus == GameStatus.DRAW)) {
+            // Cuando termina el juego, ambos jugadores deben tener isMyTurn = false
+            val syncedState = currentState.copy(
+                isMyTurn = false
+            )
+            _gameState.value = syncedState
+        }
     }
     
     fun showResetConfirmDialog() {
@@ -252,14 +306,22 @@ class GameViewModel : ViewModel() {
     
     fun handleRematchRequest(accept: Boolean) {
         if (accept) {
-            resetGame()
+            if (_gameState.value.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+                resetGameBluetooth()
+            } else {
+                resetGame()
+            }
         }
         hideRematchDialog()
     }
     
     fun handleRematchResponse(accepted: Boolean) {
         if (accepted) {
-            resetGame()
+            if (_gameState.value.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+                resetGameBluetooth()
+            } else {
+                resetGame()
+            }
         }
         setWaitingForRematchResponse(false)
     }
@@ -298,10 +360,11 @@ class GameViewModel : ViewModel() {
         val newGameState = currentState.copy(
             board = newBoard,
             currentPlayer = if (player == Player.X) Player.O else Player.X,
-            isMyTurn = true // Ahora es nuestro turno
+            isMyTurn = true // Ahora es nuestro turno después del movimiento remoto
         )
         
-        _gameState.value = checkGameEnd(newGameState)
+        val updatedState = checkGameEnd(newGameState)
+        _gameState.value = updatedState
     }
     
     fun getCurrentPlayerName(): String {
@@ -314,10 +377,22 @@ class GameViewModel : ViewModel() {
                 "Turno del jugador ${currentState.currentPlayer.name}"
             }
             GameMode.MULTIPLAYER_BLUETOOTH -> {
-                if (currentState.isMyTurn) {
-                    "Es tu turno"
-                } else {
-                    "Turno de ${currentState.opponentPlayerName}"
+                when (currentState.gameStatus) {
+                    GameStatus.PLAYING -> {
+                        if (currentState.isMyTurn) {
+                            "Es tu turno"
+                        } else {
+                            "Turno de ${currentState.opponentPlayerName}"
+                        }
+                    }
+                    GameStatus.WON -> {
+                        if (currentState.winner == currentState.localPlayer) {
+                            "¡Has ganado!"
+                        } else {
+                            "¡${currentState.opponentPlayerName} ha ganado!"
+                        }
+                    }
+                    GameStatus.DRAW -> "¡Empate!"
                 }
             }
         }
