@@ -239,6 +239,14 @@ fun TicTacToeApp(
         }
     }
     
+    // Resetear flags de Bluetooth cuando se cambia de pantalla
+    LaunchedEffect(currentScreen) {
+        if (currentScreen == "welcome") {
+            // Resetear flags cuando se vuelve al menú principal
+            bluetoothService.resetConnectionFlags()
+        }
+    }
+    
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background

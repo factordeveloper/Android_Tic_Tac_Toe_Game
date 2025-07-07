@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -133,6 +134,64 @@ fun GameScreen(
 
             // Información del juego
             GameInfoCard(gameState, viewModel)
+
+            // Información de conexión Bluetooth
+            if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (gameState.isBluetoothConnected) 
+                            Color.Green.copy(alpha = 0.1f) 
+                        else 
+                            Color.Red.copy(alpha = 0.1f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (gameState.isBluetoothConnected) 
+                                Icons.Default.Bluetooth 
+                            else 
+                                Icons.Default.BluetoothDisabled,
+                            contentDescription = null,
+                            tint = if (gameState.isBluetoothConnected) Color.Green else Color.Red,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        
+                        Spacer(modifier = Modifier.width(8.dp))
+                        
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (gameState.isBluetoothConnected) "Conectado" else "Desconectado",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (gameState.isBluetoothConnected) Color.Green else Color.Red
+                            )
+                            
+                            if (gameState.isBluetoothConnected && gameState.opponentPlayerName != "Oponente") {
+                                Text(
+                                    text = "Jugando contra ${gameState.opponentPlayerName}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                )
+                            } else if (!gameState.isBluetoothConnected) {
+                                Text(
+                                    text = "Conexión perdida",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Red.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -332,24 +391,7 @@ fun GameInfoCard(gameState: com.factordev.tic_tac_toe_game.model.GameState, view
                 style = MaterialTheme.typography.bodyMedium
             )
             
-            if (gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = if (gameState.isBluetoothConnected) "Conectado" else "Desconectado",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (gameState.isBluetoothConnected) Color.Green else Color.Red
-                )
-                
-                if (gameState.isBluetoothConnected && gameState.opponentPlayerName != "Oponente") {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Vas a jugar contra ${gameState.opponentPlayerName}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
+
         }
     }
 }

@@ -21,15 +21,20 @@ import com.factordev.tic_tac_toe_game.model.MessageType
 import com.factordev.tic_tac_toe_game.model.Player
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.isActive
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 class BluetoothService(private val context: Context) {
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -75,6 +80,19 @@ class BluetoothService(private val context: Context) {
     
     private val scope = CoroutineScope(Dispatchers.IO)
     private var isHost = false // Si este dispositivo es el host (servidor)
+    
+    // Nuevas variables para heartbeat y detección de desconexión
+    private var heartbeatJob: Job? = null
+    private var connectionCheckJob: Job? = null
+    private val lastHeartbeatReceived = AtomicLong(System.currentTimeMillis())
+    private val lastMessageSent = AtomicLong(0)
+    private var isConnectionAlive = true
+    
+    companion object {
+        private const val HEARTBEAT_INTERVAL = 5000L // 5 segundos
+        private const val CONNECTION_TIMEOUT = 15000L // 15 segundos
+        private const val SEND_TIMEOUT = 3000L // 3 segundos para envío
+    }
     
     enum class ConnectionState {
         DISCONNECTED, CONNECTING, CONNECTED, LISTENING
@@ -141,6 +159,8 @@ class BluetoothService(private val context: Context) {
         if (!hasBluetoothPermissions()) return
         
         isHost = true
+        resetConnectionFlags()
+        
         scope.launch {
             try {
                 _connectionState.value = ConnectionState.LISTENING
@@ -154,10 +174,12 @@ class BluetoothService(private val context: Context) {
                     bluetoothSocket = it
                     setupStreams(it)
                     _connectionState.value = ConnectionState.CONNECTED
+                    startConnectionMonitoring()
                     listenForMessages()
                 }
             } catch (e: IOException) {
                 _connectionState.value = ConnectionState.DISCONNECTED
+                handleDisconnection("Error al iniciar servidor: ${e.message}")
             }
         }
     }
@@ -167,6 +189,8 @@ class BluetoothService(private val context: Context) {
         if (!hasBluetoothPermissions()) return
         
         isHost = false
+        resetConnectionFlags()
+        
         scope.launch {
             try {
                 _connectionState.value = ConnectionState.CONNECTING
@@ -179,9 +203,11 @@ class BluetoothService(private val context: Context) {
                 socket.connect()
                 setupStreams(socket)
                 _connectionState.value = ConnectionState.CONNECTED
+                startConnectionMonitoring()
                 listenForMessages()
             } catch (e: IOException) {
                 _connectionState.value = ConnectionState.DISCONNECTED
+                handleDisconnection("Error al conectar con dispositivo: ${e.message}")
                 bluetoothSocket?.close()
                 bluetoothSocket = null
             }
@@ -191,31 +217,92 @@ class BluetoothService(private val context: Context) {
     private fun setupStreams(socket: BluetoothSocket) {
         inputStream = socket.inputStream
         outputStream = socket.outputStream
+        isConnectionAlive = true
+        lastHeartbeatReceived.set(System.currentTimeMillis())
+    }
+    
+    private fun startConnectionMonitoring() {
+        // Iniciar heartbeat
+        heartbeatJob = scope.launch {
+            while (isConnectionAlive && _connectionState.value == ConnectionState.CONNECTED) {
+                delay(HEARTBEAT_INTERVAL)
+                if (isConnectionAlive) {
+                    sendHeartbeat()
+                }
+            }
+        }
+        
+        // Iniciar monitoreo de conexión
+        connectionCheckJob = scope.launch {
+            while (isConnectionAlive && _connectionState.value == ConnectionState.CONNECTED) {
+                delay(CONNECTION_TIMEOUT / 3) // Verificar cada 5 segundos
+                
+                val timeSinceLastHeartbeat = System.currentTimeMillis() - lastHeartbeatReceived.get()
+                if (timeSinceLastHeartbeat > CONNECTION_TIMEOUT) {
+                    handleDisconnection("Timeout de conexión - no se recibió respuesta del oponente")
+                    break
+                }
+            }
+        }
+    }
+    
+    private fun sendHeartbeat() {
+        scope.launch {
+            if (sendMessageWithTimeout("${MessageType.HEARTBEAT}|ping")) {
+                lastMessageSent.set(System.currentTimeMillis())
+            } else {
+                handleDisconnection("Error al enviar heartbeat")
+            }
+        }
+    }
+    
+    fun resetConnectionFlags() {
+        _receivedMove.value = null
+        _receivedPlayerInfo.value = null
+        _connectionEstablished.value = false
+        _receivedGameReset.value = false
+        _receivedRematchRequest.value = false
+        _receivedRematchResponse.value = null
+        _receivedGameQuit.value = false
+        _opponentDisconnected.value = false
+        isConnectionAlive = true
+        lastHeartbeatReceived.set(System.currentTimeMillis())
+        lastMessageSent.set(0)
     }
     
     private fun listenForMessages() {
         scope.launch {
             val buffer = ByteArray(1024)
             
-            while (_connectionState.value == ConnectionState.CONNECTED) {
+            while (isConnectionAlive && _connectionState.value == ConnectionState.CONNECTED) {
                 try {
                     val bytes = inputStream?.read(buffer)
                     if (bytes != null && bytes > 0) {
                         val message = String(buffer, 0, bytes)
                         parseMessage(message)
+                        lastHeartbeatReceived.set(System.currentTimeMillis())
                     } else if (bytes == -1) {
                         // Conexión cerrada por el otro lado
-                        _opponentDisconnected.value = true
-                        _connectionState.value = ConnectionState.DISCONNECTED
+                        handleDisconnection("El oponente cerró la conexión")
                         break
                     }
                 } catch (e: IOException) {
                     // Error de conexión - el oponente se desconectó
-                    _opponentDisconnected.value = true
-                    _connectionState.value = ConnectionState.DISCONNECTED
+                    handleDisconnection("Error de conexión: ${e.message}")
                     break
                 }
             }
+        }
+    }
+    
+    private fun handleDisconnection(reason: String = "Conexión perdida") {
+        isConnectionAlive = false
+        heartbeatJob?.cancel()
+        connectionCheckJob?.cancel()
+        
+        if (_connectionState.value == ConnectionState.CONNECTED) {
+            _opponentDisconnected.value = true
+            _connectionState.value = ConnectionState.DISCONNECTED
         }
     }
     
@@ -261,6 +348,17 @@ class BluetoothService(private val context: Context) {
                     MessageType.OPPONENT_DISCONNECTED -> {
                         _opponentDisconnected.value = true
                     }
+                    MessageType.HEARTBEAT -> {
+                        if (parts.size == 2 && parts[1] == "ping") {
+                            // Responder al ping
+                            scope.launch {
+                                sendMessageWithTimeout("${MessageType.HEARTBEAT}|pong")
+                            }
+                        } else if (parts.size == 2 && parts[1] == "pong") {
+                            // Heartbeat recibido, conexión está viva
+                            lastHeartbeatReceived.set(System.currentTimeMillis())
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -268,99 +366,85 @@ class BluetoothService(private val context: Context) {
         }
     }
     
-    fun sendMove(move: Move) {
-        scope.launch {
+    private suspend fun sendMessageWithTimeout(message: String): Boolean {
+        return withTimeoutOrNull(SEND_TIMEOUT) {
             try {
-                val message = "${MessageType.MOVE}|${move.row}|${move.col}|${move.player}"
                 outputStream?.write(message.toByteArray())
                 outputStream?.flush()
+                true
             } catch (e: IOException) {
-                // Error al enviar mensaje
+                false
+            }
+        } ?: false
+    }
+    
+    fun sendMove(move: Move) {
+        scope.launch {
+            val message = "${MessageType.MOVE}|${move.row}|${move.col}|${move.player}"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar movimiento")
             }
         }
     }
     
     fun sendPlayerInfo(playerName: String, assignedPlayer: Player) {
         scope.launch {
-            try {
-                val message = "${MessageType.PLAYER_INFO}|${playerName}|${assignedPlayer}"
-                outputStream?.write(message.toByteArray())
-                outputStream?.flush()
-            } catch (e: IOException) {
-                // Error al enviar mensaje
+            val message = "${MessageType.PLAYER_INFO}|${playerName}|${assignedPlayer}"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar información del jugador")
             }
         }
     }
     
     fun sendGameStart() {
         scope.launch {
-            try {
-                val message = "${MessageType.GAME_START}|start"
-                outputStream?.write(message.toByteArray())
-                outputStream?.flush()
-            } catch (e: IOException) {
-                // Error al enviar mensaje
+            val message = "${MessageType.GAME_START}|start"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar inicio de juego")
             }
         }
     }
     
     fun sendGameReset() {
         scope.launch {
-            try {
-                val message = "${MessageType.GAME_RESET}|reset"
-                outputStream?.write(message.toByteArray())
-                outputStream?.flush()
-            } catch (e: IOException) {
-                // Error al enviar mensaje
+            val message = "${MessageType.GAME_RESET}|reset"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar reinicio de juego")
             }
         }
     }
     
     fun sendRematchRequest() {
         scope.launch {
-            try {
-                val message = "${MessageType.REMATCH_REQUEST}|request"
-                outputStream?.write(message.toByteArray())
-                outputStream?.flush()
-            } catch (e: IOException) {
-                // Error al enviar mensaje
+            val message = "${MessageType.REMATCH_REQUEST}|request"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar solicitud de revancha")
             }
         }
     }
     
     fun sendRematchResponse(accept: Boolean) {
         scope.launch {
-            try {
-                val message = "${MessageType.REMATCH_RESPONSE}|$accept"
-                outputStream?.write(message.toByteArray())
-                outputStream?.flush()
-            } catch (e: IOException) {
-                // Error al enviar mensaje
+            val message = "${MessageType.REMATCH_RESPONSE}|$accept"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar respuesta de revancha")
             }
         }
     }
     
     fun sendGameQuit() {
         scope.launch {
-            try {
-                val message = "${MessageType.GAME_QUIT}|quit"
-                outputStream?.write(message.toByteArray())
-                outputStream?.flush()
-            } catch (e: IOException) {
-                // Error al enviar mensaje
+            val message = "${MessageType.GAME_QUIT}|quit"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar salida del juego")
             }
         }
     }
     
     fun sendOpponentDisconnected() {
         scope.launch {
-            try {
-                val message = "${MessageType.OPPONENT_DISCONNECTED}|disconnected"
-                outputStream?.write(message.toByteArray())
-                outputStream?.flush()
-            } catch (e: IOException) {
-                // Error al enviar mensaje
-            }
+            val message = "${MessageType.OPPONENT_DISCONNECTED}|disconnected"
+            sendMessageWithTimeout(message) // No manejar error aquí ya que nos estamos desconectando
         }
     }
     
@@ -372,8 +456,13 @@ class BluetoothService(private val context: Context) {
                 // Notificar al oponente antes de desconectarse
                 if (_connectionState.value == ConnectionState.CONNECTED) {
                     sendOpponentDisconnected()
-                    kotlinx.coroutines.delay(100) // Dar tiempo para que se envíe el mensaje
+                    delay(200) // Dar más tiempo para que se envíe el mensaje
                 }
+                
+                // Detener monitoreo
+                isConnectionAlive = false
+                heartbeatJob?.cancel()
+                connectionCheckJob?.cancel()
                 
                 bluetoothSocket?.close()
                 bluetoothServerSocket?.close()
