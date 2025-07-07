@@ -104,5 +104,6 @@ enum class MessageType {
     GAME_QUIT,
     OPPONENT_DISCONNECTED,
     HEARTBEAT,
-    GAME_END_SYNC
+    GAME_END_SYNC,
+    GO_TO_GAME
 } 

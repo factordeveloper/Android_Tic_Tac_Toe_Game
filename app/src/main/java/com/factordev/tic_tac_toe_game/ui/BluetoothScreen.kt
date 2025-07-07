@@ -97,7 +97,7 @@ fun BluetoothScreen(
                 
                 // Si está conectado, mostrar mensaje y botón en lugar de los controles
                 if (connectionState == BluetoothService.ConnectionState.CONNECTED) {
-                    ConnectedSuccessCard(onGoToGame)
+                    ConnectedSuccessCard(bluetoothService, onGoToGame)
                 } else {
                     // Botones de control
                     BluetoothControlButtons(
@@ -360,7 +360,10 @@ fun EmptyDeviceList() {
 }
 
 @Composable
-fun ConnectedSuccessCard(onGoToGame: () -> Unit) {
+fun ConnectedSuccessCard(
+    bluetoothService: BluetoothService,
+    onGoToGame: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -400,7 +403,12 @@ fun ConnectedSuccessCard(onGoToGame: () -> Unit) {
             Spacer(modifier = Modifier.height(24.dp))
             
             Button(
-                onClick = onGoToGame,
+                onClick = {
+                    // Enviar mensaje de navegación automática al oponente
+                    bluetoothService.sendGoToGame()
+                    // Navegar al juego
+                    onGoToGame()
+                },
                 modifier = Modifier.fillMaxWidth(),
                 colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                     containerColor = Color.Green

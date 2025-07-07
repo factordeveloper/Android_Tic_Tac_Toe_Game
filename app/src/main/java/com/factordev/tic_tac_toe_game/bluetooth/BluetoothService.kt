@@ -76,6 +76,9 @@ class BluetoothService(private val context: Context) {
     private val _receivedGameEndSync = MutableStateFlow<Boolean>(false)
     val receivedGameEndSync: StateFlow<Boolean> = _receivedGameEndSync.asStateFlow()
     
+    private val _receivedGoToGame = MutableStateFlow<Boolean>(false)
+    val receivedGoToGame: StateFlow<Boolean> = _receivedGoToGame.asStateFlow()
+    
     private var bluetoothSocket: BluetoothSocket? = null
     private var bluetoothServerSocket: BluetoothServerSocket? = null
     private var inputStream: InputStream? = null
@@ -273,6 +276,7 @@ class BluetoothService(private val context: Context) {
         _receivedGameQuit.value = false
         _opponentDisconnected.value = false
         _receivedGameEndSync.value = false
+        _receivedGoToGame.value = false
         isConnectionAlive = true
         lastHeartbeatReceived.set(System.currentTimeMillis())
         lastMessageSent.set(0)
@@ -408,6 +412,14 @@ class BluetoothService(private val context: Context) {
                             _receivedGameEndSync.value = false
                         }
                     }
+                    MessageType.GO_TO_GAME -> {
+                        _receivedGoToGame.value = true
+                        // Auto-resetear el flag después de un breve delay
+                        scope.launch {
+                            kotlinx.coroutines.delay(100)
+                            _receivedGoToGame.value = false
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -511,6 +523,15 @@ class BluetoothService(private val context: Context) {
             val message = "${MessageType.GAME_END_SYNC}|sync"
             if (!sendMessageWithTimeout(message)) {
                 handleDisconnection("Error al enviar sincronización de fin de juego")
+            }
+        }
+    }
+    
+    fun sendGoToGame() {
+        scope.launch {
+            val message = "${MessageType.GO_TO_GAME}|navigate"
+            if (!sendMessageWithTimeout(message)) {
+                handleDisconnection("Error al enviar navegación al juego")
             }
         }
     }

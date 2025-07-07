@@ -163,6 +163,7 @@ fun TicTacToeApp(
     val receivedGameQuit by bluetoothService.receivedGameQuit.collectAsState()
     val opponentDisconnected by bluetoothService.opponentDisconnected.collectAsState()
     val receivedGameEndSync by bluetoothService.receivedGameEndSync.collectAsState()
+    val receivedGoToGame by bluetoothService.receivedGoToGame.collectAsState()
     
     // Escuchar movimientos recibidos por Bluetooth
     LaunchedEffect(receivedMove) {
@@ -269,6 +270,14 @@ fun TicTacToeApp(
         if (receivedGameEndSync && gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
             // Sincronizar el estado del juego cuando termina
             viewModel.synchronizeGameEnd()
+        }
+    }
+    
+    // Escuchar navegación automática al juego
+    LaunchedEffect(receivedGoToGame) {
+        if (receivedGoToGame && gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH) {
+            // Navegar automáticamente al juego cuando el oponente hace clic en "Ir al Juego"
+            currentScreen = "game"
         }
     }
     
