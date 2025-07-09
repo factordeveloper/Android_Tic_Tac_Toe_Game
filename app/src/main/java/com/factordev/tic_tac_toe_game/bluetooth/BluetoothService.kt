@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import com.factordev.tic_tac_toe_game.model.Move
 import com.factordev.tic_tac_toe_game.model.PlayerInfo
@@ -30,6 +31,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.CancellationException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -37,8 +39,20 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 class BluetoothService(private val context: Context) {
-    private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-    private val bluetoothAdapter = bluetoothManager.adapter
+    
+    companion object {
+        private const val TAG = "BluetoothService"
+        private const val HEARTBEAT_INTERVAL = 5000L // 5 segundos
+        private const val CONNECTION_TIMEOUT = 15000L // 15 segundos
+        private const val SEND_TIMEOUT = 3000L // 3 segundos para envío
+    }
+    
+    private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+    private val bluetoothAdapter = bluetoothManager?.adapter
+    
+    // Verificar si Bluetooth está disponible
+    private val isBluetoothAvailable: Boolean
+        get() = bluetoothManager != null && bluetoothAdapter != null
     
     private val _discoveredDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<BluetoothDevice>> = _discoveredDevices.asStateFlow()
@@ -90,18 +104,12 @@ class BluetoothService(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.IO)
     private var isHost = false // Si este dispositivo es el host (servidor)
     
-    // Nuevas variables para heartbeat y detección de desconexión
+    // Variables para heartbeat y detección de desconexión
     private var heartbeatJob: Job? = null
     private var connectionCheckJob: Job? = null
     private val lastHeartbeatReceived = AtomicLong(System.currentTimeMillis())
     private val lastMessageSent = AtomicLong(0)
     private var isConnectionAlive = true
-    
-    companion object {
-        private const val HEARTBEAT_INTERVAL = 5000L // 5 segundos
-        private const val CONNECTION_TIMEOUT = 15000L // 15 segundos
-        private const val SEND_TIMEOUT = 3000L // 3 segundos para envío
-    }
     
     enum class ConnectionState {
         DISCONNECTED, CONNECTING, CONNECTED, LISTENING
@@ -109,63 +117,97 @@ class BluetoothService(private val context: Context) {
     
     private val deviceReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                BluetoothDevice.ACTION_FOUND -> {
-                    val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) as? BluetoothDevice
-                    }
-                    
-                    device?.let { bluetoothDevice ->
-                        val currentDevices = _discoveredDevices.value.toMutableList()
-                        if (!currentDevices.contains(bluetoothDevice)) {
-                            currentDevices.add(bluetoothDevice)
-                            _discoveredDevices.value = currentDevices
+            try {
+                when (intent?.action) {
+                    BluetoothDevice.ACTION_FOUND -> {
+                        val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) as? BluetoothDevice
+                        }
+                        
+                        device?.let { bluetoothDevice ->
+                            val currentDevices = _discoveredDevices.value.toMutableList()
+                            if (!currentDevices.contains(bluetoothDevice)) {
+                                currentDevices.add(bluetoothDevice)
+                                _discoveredDevices.value = currentDevices
+                            }
                         }
                     }
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                        Log.d(TAG, "Descubrimiento de dispositivos terminado")
+                    }
                 }
-                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
-                    // Descubrimiento terminado
-                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error en deviceReceiver: ${e.message}", e)
             }
         }
     }
     
     init {
-        val filter = IntentFilter().apply {
-            addAction(BluetoothDevice.ACTION_FOUND)
-            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+        try {
+            val filter = IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+            }
+            context.registerReceiver(deviceReceiver, filter)
+            Log.d(TAG, "BluetoothService inicializado. Disponible: $isBluetoothAvailable")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al inicializar BluetoothService: ${e.message}", e)
         }
-        context.registerReceiver(deviceReceiver, filter)
     }
     
-    @SuppressLint("MissingPermission")
     fun startDiscovery() {
-        if (!hasBluetoothPermissions()) return
-        
-        _discoveredDevices.value = emptyList()
-        
-        if (bluetoothAdapter.isDiscovering) {
-            bluetoothAdapter.cancelDiscovery()
+        if (!isBluetoothAvailable || !hasBluetoothPermissions()) {
+            Log.w(TAG, "No se puede iniciar descubrimiento: Bluetooth no disponible o sin permisos")
+            return
         }
         
-        bluetoothAdapter.startDiscovery()
+        try {
+            _discoveredDevices.value = emptyList()
+            
+            bluetoothAdapter?.let { adapter ->
+                if (adapter.isDiscovering) {
+                    adapter.cancelDiscovery()
+                }
+                
+                val started = adapter.startDiscovery()
+                if (started) {
+                    Log.d(TAG, "Descubrimiento iniciado")
+                } else {
+                    Log.w(TAG, "No se pudo iniciar el descubrimiento")
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Error de permisos al iniciar descubrimiento: ${e.message}", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al iniciar descubrimiento: ${e.message}", e)
+        }
     }
     
-    @SuppressLint("MissingPermission")
     fun stopDiscovery() {
-        if (!hasBluetoothPermissions()) return
+        if (!isBluetoothAvailable || !hasBluetoothPermissions()) return
         
-        if (bluetoothAdapter.isDiscovering) {
-            bluetoothAdapter.cancelDiscovery()
+        try {
+            bluetoothAdapter?.let { adapter ->
+                if (adapter.isDiscovering) {
+                    adapter.cancelDiscovery()
+                    Log.d(TAG, "Descubrimiento detenido")
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Error de permisos al detener descubrimiento: ${e.message}", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al detener descubrimiento: ${e.message}", e)
         }
     }
     
-    @SuppressLint("MissingPermission")
     fun startServer() {
-        if (!hasBluetoothPermissions()) return
+        if (!isBluetoothAvailable || !hasBluetoothPermissions()) {
+            Log.w(TAG, "No se puede iniciar servidor: Bluetooth no disponible o sin permisos")
+            return
+        }
         
         isHost = true
         resetConnectionFlags()
@@ -173,29 +215,45 @@ class BluetoothService(private val context: Context) {
         scope.launch {
             try {
                 _connectionState.value = ConnectionState.LISTENING
+                Log.d(TAG, "Iniciando servidor Bluetooth...")
                 
-                bluetoothServerSocket = bluetoothAdapter.listenUsingRfcommWithServiceRecord(
-                    serviceName, serviceUUID
-                )
-                
-                val socket = bluetoothServerSocket?.accept()
-                socket?.let {
-                    bluetoothSocket = it
-                    setupStreams(it)
-                    _connectionState.value = ConnectionState.CONNECTED
-                    startConnectionMonitoring()
-                    listenForMessages()
+                bluetoothAdapter?.let { adapter ->
+                    bluetoothServerSocket = adapter.listenUsingRfcommWithServiceRecord(
+                        serviceName, serviceUUID
+                    )
+                    
+                    Log.d(TAG, "Esperando conexión...")
+                    val socket = bluetoothServerSocket?.accept()
+                    socket?.let {
+                        Log.d(TAG, "Cliente conectado: ${it.remoteDevice?.address}")
+                        bluetoothSocket = it
+                        setupStreams(it)
+                        _connectionState.value = ConnectionState.CONNECTED
+                        startConnectionMonitoring()
+                        listenForMessages()
+                    }
                 }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Error de permisos al iniciar servidor: ${e.message}", e)
+                _connectionState.value = ConnectionState.DISCONNECTED
+                handleDisconnection("Error de permisos al iniciar servidor")
             } catch (e: IOException) {
+                Log.e(TAG, "Error de IO al iniciar servidor: ${e.message}", e)
                 _connectionState.value = ConnectionState.DISCONNECTED
                 handleDisconnection("Error al iniciar servidor: ${e.message}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error inesperado al iniciar servidor: ${e.message}", e)
+                _connectionState.value = ConnectionState.DISCONNECTED
+                handleDisconnection("Error inesperado al iniciar servidor")
             }
         }
     }
     
-    @SuppressLint("MissingPermission")
     fun connectToDevice(device: BluetoothDevice) {
-        if (!hasBluetoothPermissions()) return
+        if (!isBluetoothAvailable || !hasBluetoothPermissions()) {
+            Log.w(TAG, "No se puede conectar: Bluetooth no disponible o sin permisos")
+            return
+        }
         
         isHost = false
         resetConnectionFlags()
@@ -203,22 +261,34 @@ class BluetoothService(private val context: Context) {
         scope.launch {
             try {
                 _connectionState.value = ConnectionState.CONNECTING
+                Log.d(TAG, "Conectando a dispositivo: ${device.address}")
+                
+                bluetoothAdapter?.cancelDiscovery()
                 
                 val socket = device.createRfcommSocketToServiceRecord(serviceUUID)
                 bluetoothSocket = socket
                 
-                bluetoothAdapter.cancelDiscovery()
-                
                 socket.connect()
+                Log.d(TAG, "Conectado a dispositivo: ${device.address}")
                 setupStreams(socket)
                 _connectionState.value = ConnectionState.CONNECTED
                 startConnectionMonitoring()
                 listenForMessages()
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Error de permisos al conectar: ${e.message}", e)
+                _connectionState.value = ConnectionState.DISCONNECTED
+                handleDisconnection("Error de permisos al conectar")
+                cleanup()
             } catch (e: IOException) {
+                Log.e(TAG, "Error de IO al conectar: ${e.message}", e)
                 _connectionState.value = ConnectionState.DISCONNECTED
                 handleDisconnection("Error al conectar con dispositivo: ${e.message}")
-                bluetoothSocket?.close()
-                bluetoothSocket = null
+                cleanup()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error inesperado al conectar: ${e.message}", e)
+                _connectionState.value = ConnectionState.DISCONNECTED
+                handleDisconnection("Error inesperado al conectar")
+                cleanup()
             }
         }
     }
@@ -579,42 +649,81 @@ class BluetoothService(private val context: Context) {
     }
     
     private fun hasBluetoothPermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            } else {
+                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al verificar permisos de Bluetooth: ${e.message}", e)
+            false
         }
     }
     
-    fun isBluetoothEnabled(): Boolean = bluetoothAdapter.isEnabled
+    fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled ?: false
     
-    @SuppressLint("MissingPermission")
     fun getLocalDeviceInfo(): String {
-        if (!hasBluetoothPermissions()) return "Dispositivo Bluetooth"
-        
-        val deviceName = bluetoothAdapter.name ?: "Dispositivo sin nombre"
-        val deviceAddress = bluetoothAdapter.address ?: "Sin dirección"
-        return "$deviceName (${deviceAddress.takeLast(8)})"
+        return try {
+            if (!hasBluetoothPermissions()) return "Dispositivo Bluetooth"
+            
+            val deviceName = bluetoothAdapter?.name ?: "Dispositivo sin nombre"
+            val deviceAddress = bluetoothAdapter?.address ?: "Sin dirección"
+            "$deviceName (${deviceAddress.takeLast(8)})"
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Error de permisos al obtener info del dispositivo: ${e.message}", e)
+            "Dispositivo Bluetooth"
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al obtener info del dispositivo: ${e.message}", e)
+            "Dispositivo Bluetooth"
+        }
     }
     
-    @SuppressLint("MissingPermission")
     fun getDeviceDisplayName(device: BluetoothDevice): String {
-        if (!hasBluetoothPermissions()) return "Dispositivo Bluetooth"
-        
-        val deviceName = device.name ?: "Dispositivo sin nombre"
-        val shortAddress = device.address.takeLast(8)
-        
-        return if (deviceName.contains("TicTacToe")) {
-            "$deviceName"
-        } else {
-            "$deviceName ($shortAddress)"
+        return try {
+            if (!hasBluetoothPermissions()) return "Dispositivo Bluetooth"
+            
+            val deviceName = device.name ?: "Dispositivo sin nombre"
+            val shortAddress = device.address.takeLast(8)
+            
+            if (deviceName.contains("TicTacToe")) {
+                deviceName
+            } else {
+                "$deviceName ($shortAddress)"
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Error de permisos al obtener nombre del dispositivo: ${e.message}", e)
+            "Dispositivo Bluetooth"
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al obtener nombre del dispositivo: ${e.message}", e)
+            "Dispositivo Bluetooth"
         }
     }
     
     fun cleanup() {
-        context.unregisterReceiver(deviceReceiver)
-        disconnect()
+        try {
+            Log.d(TAG, "Iniciando cleanup de BluetoothService")
+            
+            // Detener descubrimiento si está activo
+            stopDiscovery()
+            
+            // Desconectar
+            disconnect()
+            
+            // Unregister receiver
+            try {
+                context.unregisterReceiver(deviceReceiver)
+                Log.d(TAG, "BroadcastReceiver desregistrado")
+            } catch (e: IllegalArgumentException) {
+                // El receiver ya fue desregistrado
+                Log.d(TAG, "BroadcastReceiver ya estaba desregistrado")
+            }
+            
+            Log.d(TAG, "Cleanup de BluetoothService completado")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error durante cleanup: ${e.message}", e)
+        }
     }
 } 

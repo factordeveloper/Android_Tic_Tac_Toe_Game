@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -52,8 +53,12 @@ import com.factordev.tic_tac_toe_game.ui.theme.Tic_Tac_Toe_GameTheme
 import com.factordev.tic_tac_toe_game.viewmodel.GameViewModel
 
 class MainActivity : ComponentActivity() {
-    private lateinit var bluetoothService: BluetoothService
-    private lateinit var bluetoothAdapter: BluetoothAdapter
+    private var bluetoothService: BluetoothService? = null
+    private var bluetoothAdapter: BluetoothAdapter? = null
+    
+    companion object {
+        private const val TAG = "MainActivity"
+    }
     
     private val requestBluetoothPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -68,7 +73,6 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            // Bluetooth activado exitosamente, mostrar mensaje de éxito
             Toast.makeText(this, "Bluetooth activado correctamente", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(this, "Se requiere activar Bluetooth para jugar multijugador", Toast.LENGTH_LONG).show()
@@ -77,64 +81,123 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
         
-        // Inicializar Bluetooth
-        val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-        bluetoothAdapter = bluetoothManager.adapter
-        bluetoothService = BluetoothService(this)
-        
-        setContent {
-            Tic_Tac_Toe_GameTheme {
-                TicTacToeApp(
-                    bluetoothService = bluetoothService,
-                    onRequestBluetoothPermissions = { requestBluetoothPermissions() },
-                    onEnableBluetooth = { enableBluetooth() },
-                    hasBluetoothPermissions = { hasBluetoothPermissions() }
-                )
+        try {
+            enableEdgeToEdge()
+            
+            // Inicializar Bluetooth con verificaciones de seguridad
+            initializeBluetooth()
+            
+            setContent {
+                Tic_Tac_Toe_GameTheme {
+                    bluetoothService?.let { service ->
+                        TicTacToeApp(
+                            bluetoothService = service,
+                            onRequestBluetoothPermissions = { requestBluetoothPermissions() },
+                            onEnableBluetooth = { enableBluetooth() },
+                            hasBluetoothPermissions = { hasBluetoothPermissions() }
+                        )
+                    } ?: run {
+                        // Fallback UI si Bluetooth no está disponible
+                        TicTacToeAppWithoutBluetooth()
+                    }
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error en onCreate: ${e.message}", e)
+            // Crear UI sin Bluetooth en caso de error
+            setContent {
+                Tic_Tac_Toe_GameTheme {
+                    TicTacToeAppWithoutBluetooth()
+                }
+            }
+        }
+    }
+    
+    private fun initializeBluetooth() {
+        try {
+            val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager
+            if (bluetoothManager == null) {
+                Log.w(TAG, "BluetoothManager no disponible")
+                return
+            }
+            
+            bluetoothAdapter = bluetoothManager.adapter
+            if (bluetoothAdapter == null) {
+                Log.w(TAG, "BluetoothAdapter no disponible - dispositivo sin Bluetooth")
+                return
+            }
+            
+            bluetoothService = BluetoothService(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al inicializar Bluetooth: ${e.message}", e)
+            bluetoothAdapter = null
+            bluetoothService = null
         }
     }
     
     override fun onDestroy() {
         super.onDestroy()
-        bluetoothService.cleanup()
+        try {
+            bluetoothService?.cleanup()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error en cleanup: ${e.message}", e)
+        }
     }
     
     private fun requestBluetoothPermissions() {
-        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
-        } else {
-            arrayOf(
-                Manifest.permission.BLUETOOTH,
-                Manifest.permission.BLUETOOTH_ADMIN,
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            )
+        try {
+            val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                arrayOf(
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_ADVERTISE,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                )
+            } else {
+                arrayOf(
+                    Manifest.permission.BLUETOOTH,
+                    Manifest.permission.BLUETOOTH_ADMIN,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            }
+            
+            requestBluetoothPermissions.launch(permissions)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al solicitar permisos: ${e.message}", e)
+            Toast.makeText(this, "Error al solicitar permisos de Bluetooth", Toast.LENGTH_SHORT).show()
         }
-        
-        requestBluetoothPermissions.launch(permissions)
     }
     
     private fun enableBluetooth() {
-        if (!bluetoothAdapter.isEnabled) {
-            val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-            enableBluetoothLauncher.launch(enableBtIntent)
+        try {
+            bluetoothAdapter?.let { adapter ->
+                if (!adapter.isEnabled) {
+                    val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                    enableBluetoothLauncher.launch(enableBtIntent)
+                }
+            } ?: run {
+                Toast.makeText(this, "Bluetooth no disponible en este dispositivo", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al activar Bluetooth: ${e.message}", e)
+            Toast.makeText(this, "Error al activar Bluetooth", Toast.LENGTH_SHORT).show()
         }
     }
     
     private fun hasBluetoothPermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            } else {
+                ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al verificar permisos: ${e.message}", e)
+            false
         }
     }
 }
@@ -420,6 +483,51 @@ fun TicTacToeApp(
             gameState.gameMode == GameMode.MULTIPLAYER_BLUETOOTH && currentScreen == "welcome") {
             // Bluetooth activado, proceder a configuración
             currentScreen = "bluetooth_setup"
+        }
+    }
+}
+
+@Composable
+fun TicTacToeAppWithoutBluetooth() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        val viewModel: GameViewModel = viewModel()
+        var currentScreen by remember { mutableStateOf("welcome") }
+        
+        when (currentScreen) {
+            "welcome" -> {
+                WelcomeScreen(
+                    onModeSelected = { mode ->
+                        viewModel.setGameMode(mode)
+                        if (mode == GameMode.MULTIPLAYER_BLUETOOTH) {
+                            Toast.makeText(
+                                context, 
+                                "Bluetooth no disponible en este dispositivo", 
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            currentScreen = "game"
+                        }
+                    }
+                )
+            }
+            "game" -> {
+                GameScreen(
+                    viewModel = viewModel,
+                    onBluetoothClick = { /* Sin función Bluetooth */ },
+                    onMoveBluetoothSend = { /* Sin función Bluetooth */ },
+                    onGameEndSync = { /* Sin función Bluetooth */ },
+                    onBackToWelcome = { currentScreen = "welcome" },
+                    onGameReset = { viewModel.resetGame() },
+                    onRematchRequest = { /* Sin función multijugador */ },
+                    onRematchResponse = { /* Sin función multijugador */ },
+                    onGameQuit = { currentScreen = "welcome" }
+                )
+            }
         }
     }
 }
